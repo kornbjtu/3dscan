@@ -1,0 +1,47 @@
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ---------- 第三方工具与虚拟环境（约 13 GB，不入库） ----------
+tools/
+
+# ---------- 原始相机素材 ----------
+VID_*.insv
+LRV_*.lrv
+VID_*.mp4
+*.insv
+*.lrv
+insv_out/
+
+# ---------- 重建中间产物 ----------
+recon/**
+# 仅保留 recon 下自己写的 Python 脚本，其余（帧、特征库、点云、模型、页面）一律忽略
+!recon/**/
+!recon/**/*.py
+
+# ---------- 模型 / 点云 / 缓存 ----------
+*.ply
+*.splat
+*.spz
+*.db
+*.db-shm
+*.db-wal
+*.bin
+*.log
+
+# ---------- 临时文件 ----------
+.screenshots/
+.tmp/
+tmp/
+*.tmp
+*.temp
+
+# ---------- 系统与编辑器 ----------
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
