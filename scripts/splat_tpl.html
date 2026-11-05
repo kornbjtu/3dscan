@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<title>高斯泼溅漫游 · __N__ splats</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#0b0d10;color:#dfe6ee;
+    font:13px/1.5 "Segoe UI",system-ui,sans-serif}
+  canvas{display:block;width:100%;height:100%;cursor:crosshair;touch-action:none}
+  #stick{position:fixed;left:26px;bottom:34px;width:136px;height:136px;border-radius:50%;
+    background:rgba(20,28,40,.5);border:1px solid rgba(120,170,255,.22);
+    touch-action:none;display:none;z-index:6}
+  #knob{position:absolute;left:50%;top:50%;width:58px;height:58px;margin:-29px 0 0 -29px;
+    border-radius:50%;background:rgba(140,190,255,.42);border:1px solid rgba(170,205,255,.7);
+    pointer-events:none}
+  #mlabel{position:fixed;left:26px;bottom:180px;font:11px/1.5 "Segoe UI",system-ui,sans-serif;
+    color:#8ea6c0;display:none;z-index:6;pointer-events:none}
+  #hud{position:fixed;left:14px;top:12px;padding:10px 14px;background:rgba(12,16,22,.72);
+    border:1px solid rgba(120,170,255,.18);border-radius:10px;backdrop-filter:blur(6px);
+    pointer-events:none;font-size:12px;line-height:1.7}
+  #hud b{color:#8fc4ff;font-weight:600}
+  #hud kbd{background:#1b2230;border:1px solid #2c3648;border-radius:4px;padding:0 4px;
+    font:11px ui-monospace,Consolas,monospace;color:#a9c4e8}
+  #tip{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);padding:9px 18px;
+    background:rgba(12,16,22,.78);border:1px solid rgba(120,170,255,.18);border-radius:999px;
+    font-size:12px;color:#9fb4cc;pointer-events:none}
+  .hidden{display:none!important}
+  @media (pointer:coarse){
+    #stick,#mlabel{display:block}
+    #hud{padding:8px 10px;font-size:11px;opacity:.8}
+    #tip{display:none!important}
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="stick"><div id="knob"></div></div>
+<div id="mlabel">左摇杆移动 · 划屏幕转视角</div>
+<div id="hud">
+  <div><b>高斯泼溅</b> · __N__ 个</div>
+  <div><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> 前后左右（沿视线飞）</div>
+  <div><kbd>空格</kbd> 上升 · <kbd>Shift</kbd> 下降</div>
+  <div>双击 <kbd>W</kbd> 疾跑 · 滚轮调速</div>
+  <div>鼠标转向 · <kbd>ESC</kbd> 释放</div>
+  <div id="stat">–</div>
+</div>
+<div id="tip">点击画面锁定鼠标，开始飞行</div>
+
+<script id="splat-data" type="text/plain">__DATA__</script>
+<script>
+"use strict";
+const N = __N__;
+const START = [__SX__, __SY__, __SZ__];
+const YAW0 = __YAW__, PITCH0 = __PITCH__;
+const SPLAT_BYTES = 32;
+
+// ---------- 解码 ----------
+const b64 = document.getElementById('splat-data').textContent.trim();
+const bin = atob(b64);
+const raw = new Uint8Array(bin.length);
+for (let i = 0; i < bin.length; i++) raw[i] = bin.charCodeAt(i);
+const f32 = new Float32Array(raw.buffer);   // 每 splat 8 个 float = 32 字节
+const u8  = raw;
+
+// ---------- WebGL ----------
+const canvas = document.getElementById('c');
+const gl = canvas.getContext('webgl2', { antialias: false, alpha: false, powerPreference: 'high-performance' });
+if (!gl) { document.body.innerHTML = '<p style="padding:40px">此浏览器不支持 WebGL2</p>'; }
+
+const VS = `#version 300 es
+precision highp float;
+uniform mat4 uProj, uView;
+uniform vec2 uViewport;
+uniform int uTexW;
+uniform sampler2D tPos, tScale, tQuat, tCol;
+in uint aIdx;
+in vec2 aCorner;
+out vec3 vColor; out float vOpacity; out vec2 vCenterPx; out vec3 vConic;
+
+mat3 quatToMat(vec4 q){
+  float w=q.x, x=q.y, y=q.z, z=q.w;
+  return mat3(
+    vec3(1.-2.*(y*y+z*z), 2.*(x*y+w*z), 2.*(x*z-w*y)),
+    vec3(2.*(x*y-w*z), 1.-2.*(x*x+z*z), 2.*(y*z+w*x)),
+    vec3(2.*(x*z+w*y), 2.*(y*z-w*x), 1.-2.*(x*x+y*y)));
+}
+void main(){
+  ivec2 uv = ivec2(int(aIdx) % uTexW, int(aIdx) / uTexW);
+  vec4 pp = texelFetch(tPos, uv, 0);
+  vec3 sc = texelFetch(tScale, uv, 0).xyz;
+  vec4 q  = normalize(texelFetch(tQuat, uv, 0));
+  vec3 cl = texelFetch(tCol, uv, 0).rgb;
+
+  vec4 cam = uView * vec4(pp.xyz, 1.0);
+  if (cam.z > -0.12) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
+
+  mat3 R = quatToMat(q);
+  mat3 M = R * mat3(sc.x,0.,0., 0.,sc.y,0., 0.,0.,sc.z);
+  mat3 Sigma = M * transpose(M);
+  mat3 W = mat3(uView);
+  mat3 T = W * Sigma * transpose(W);
+
+  float invz = 1.0 / cam.z;
+  float fx = uProj[0][0] * uViewport.x * 0.5;
+  float fy = uProj[1][1] * uViewport.y * 0.5;
+  mat3 J = mat3(fx*invz, 0., -fx*cam.x*invz*invz,
+                0., fy*invz, -fy*cam.y*invz*invz,
+                0., 0., 0.);
+  mat3 cov = J * T * transpose(J);
+  float a = cov[0][0] + 0.3;
+  float b = cov[0][1];
+  float c = cov[1][1] + 0.3;
+  float det = a*c - b*b;
+  if (det < 1e-9) { gl_Position = vec4(2.0,2.0,2.0,1.0); return; }
+
+  vec4 clip = uProj * cam;
+  vec2 ctr = clip.xy / clip.w;
+  float mid = 0.5*(a+c);
+  float l1 = mid + sqrt(max(0.25*(a-c)*(a-c) + b*b, 0.0));
+  float rad = 3.0 * sqrt(max(l1, 0.2));
+  rad = min(rad, 0.5 * min(uViewport.x, uViewport.y));
+  vec2 off = aCorner * rad;
+  clip.xy += (off / uViewport * 2.0) * clip.w;
+  gl_Position = clip;
+
+  vConic = vec3(c/det, -b/det, a/det);
+  vCenterPx = (ctr * 0.5 + 0.5) * uViewport;
+  vColor = cl;
+  vOpacity = pp.w;
+}`;
+
+const FS = `#version 300 es
+precision highp float;
+in vec3 vColor; in float vOpacity; in vec2 vCenterPx; in vec3 vConic;
+out vec4 frag;
+void main(){
+  float dx = gl_FragCoord.x - vCenterPx.x;
+  float dy = gl_FragCoord.y - vCenterPx.y;
+  float p = -0.5*(vConic.x*dx*dx + 2.0*vConic.y*dx*dy + vConic.z*dy*dy);
+  if (p > 0.0 || p < -4.0) discard;
+  float a = min(0.995, vOpacity * exp(p));
+  if (a < 0.004) discard;
+  frag = vec4(vColor * a, a);
+}`;
+
+function sh(type, src) {
+  const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(s));
+  return s;
+}
+const prog = gl.createProgram();
+gl.attachShader(prog, sh(gl.VERTEX_SHADER, VS));
+gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, FS));
+gl.linkProgram(prog);
+if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) console.error(gl.getProgramInfoLog(prog));
+gl.useProgram(prog);
+gl.disable(gl.DEPTH_TEST);
+gl.enable(gl.BLEND);
+gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+
+// ---------- 数据纹理 ----------
+const TEXW = 1024, TEXH = Math.ceil(N / TEXW);
+function mkTex(internal, fmt, type, fill) {
+  const t = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texImage2D(gl.TEXTURE_2D, 0, internal, TEXW, TEXH, 0, fmt, type, fill);
+  return t;
+}
+const posArr = new Float32Array(TEXW * TEXH * 4);
+const sclArr = new Float32Array(TEXW * TEXH * 4);
+const qutArr = new Float32Array(TEXW * TEXH * 4);
+const colArr = new Uint8Array(TEXW * TEXH * 4);
+for (let i = 0; i < N; i++) {
+  posArr[i*4+0] = f32[i*8+0];
+  posArr[i*4+1] = f32[i*8+1];
+  posArr[i*4+2] = f32[i*8+2];
+  sclArr[i*4+0] = f32[i*8+3];
+  sclArr[i*4+1] = f32[i*8+4];
+  sclArr[i*4+2] = f32[i*8+5];
+  const o = i * 32;
+  posArr[i*4+3] = u8[o+31] / 255;
+  qutArr[i*4+0] = u8[o+24]/255*2 - 1;
+  qutArr[i*4+1] = u8[o+25]/255*2 - 1;
+  qutArr[i*4+2] = u8[o+26]/255*2 - 1;
+  qutArr[i*4+3] = u8[o+27]/255*2 - 1;
+  colArr[i*4+0] = u8[o+28]; colArr[i*4+1] = u8[o+29];
+  colArr[i*4+2] = u8[o+30]; colArr[i*4+3] = 255;
+}
+const tPos = mkTex(gl.RGBA32F, gl.RGBA, gl.FLOAT, posArr);
+const tScl = mkTex(gl.RGBA32F, gl.RGBA, gl.FLOAT, sclArr);
+const tQut = mkTex(gl.RGBA32F, gl.RGBA, gl.FLOAT, qutArr);
+const tCol = mkTex(gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, colArr);
+const TEXS = [tPos, tScl, tQut, tCol];
+function bindTextures() {
+  for (let i = 0; i < 4; i++) {
+    gl.activeTexture(gl.TEXTURE0 + i);
+    gl.bindTexture(gl.TEXTURE_2D, TEXS[i]);
+  }
+}
+bindTextures();
+gl.uniform1i(gl.getUniformLocation(prog, 'tPos'), 0);
+gl.uniform1i(gl.getUniformLocation(prog, 'tScale'), 1);
+gl.uniform1i(gl.getUniformLocation(prog, 'tQuat'), 2);
+gl.uniform1i(gl.getUniformLocation(prog, 'tCol'), 3);
+gl.uniform1i(gl.getUniformLocation(prog, 'uTexW'), TEXW);
+
+// ---------- 实例索引（排序结果） ----------
+const order = new Uint32Array(N);
+const idxBuf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, idxBuf);
+gl.bufferData(gl.ARRAY_BUFFER, order, gl.DYNAMIC_DRAW);
+const aIdxLoc = gl.getAttribLocation(prog, 'aIdx');
+gl.enableVertexAttribArray(aIdxLoc);
+gl.vertexAttribIPointer(aIdxLoc, 1, gl.UNSIGNED_INT, 0, 0);
+gl.vertexAttribDivisor(aIdxLoc, 1);
+
+// 四边形
+const quad = new Float32Array([-1,-1, 1,-1, -1,1, 1,1]);
+const quadBuf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+gl.bufferData(gl.ARRAY_BUFFER, quad, gl.STATIC_DRAW);
+const aCornerLoc = gl.getAttribLocation(prog, 'aCorner');
+gl.enableVertexAttribArray(aCornerLoc);
+gl.vertexAttribPointer(aCornerLoc, 2, gl.FLOAT, false, 0, 0);
+
+// ---------- 相机（Minecraft 创造模式飞行手感）----------
+const cam = { x: START[0], y: START[1], z: START[2], yaw: YAW0, pitch: PITCH0, speed: 4.0 };
+const vel = [0, 0, 0];              // 速度向量（惯性）
+window.__cam = cam;                 // 便于外部查看当前位姿（调试用）
+const keys = {};
+const SENS = 0.0028;                // 鼠标灵敏度 rad/px
+const ACC = 9.0, DEC = 11.0;        // 加速 / 减速响应
+let sprinting = false, lastW = 0;
+let fovCur = 1.22;                  // 垂直 FOV（约 70°，接近 MC 默认）
+
+addEventListener('keydown', e => {
+  if (e.code === 'Space') e.preventDefault();
+  if (e.code === 'KeyW' && !keys.KeyW) {
+    const t = performance.now();
+    if (t - lastW < 300) sprinting = true;      // 双击 W 疾跑（同 MC）
+    lastW = t;
+  }
+  keys[e.code] = true;
+  if (e.code.startsWith('Key') || e.code.startsWith('Arrow')) e.preventDefault();
+});
+addEventListener('keyup', e => {
+  keys[e.code] = false;
+  if (e.code === 'KeyW') sprinting = false;     // 松开 W 退出疾跑
+});
+
+// 指针锁定：点击画面后鼠标直接转视角（这是和拖拽式观察的根本区别）
+const tip = document.getElementById('tip');
+let dragging = false, lastX = 0, lastY = 0;
+canvas.addEventListener('mousedown', e => {
+  if (isTouch) return;
+  dragging = true; lastX = e.clientX; lastY = e.clientY;
+});
+canvas.addEventListener('click', () => {
+  if (isTouch) return;
+  if (!document.pointerLockElement) {
+    const p = canvas.requestPointerLock();
+    if (p && p.catch) p.catch(() => {});
+  }
+});
+document.addEventListener('pointerlockchange', () => {
+  const on = document.pointerLockElement === canvas;
+  tip.textContent = on ? 'ESC 释放鼠标' : '点击画面锁定鼠标，开始飞行';
+  tip.classList.remove('hidden');
+});
+document.addEventListener('pointerlockerror', () => {
+  tip.textContent = '指针锁定被拒绝，改用按住左键拖动观察';
+});
+
+addEventListener('mouseup', () => { dragging = false; });
+document.addEventListener('mousemove', e => {
+  const locked = document.pointerLockElement === canvas;
+  if (!locked && !dragging) return;
+  const dx = locked ? e.movementX : (e.clientX - lastX);
+  const dy = locked ? e.movementY : (e.clientY - lastY);
+  if (!locked) { lastX = e.clientX; lastY = e.clientY; }
+  cam.yaw += dx * SENS;
+  cam.pitch -= dy * SENS;
+  cam.pitch = Math.max(-1.52, Math.min(1.52, cam.pitch));
+});
+canvas.addEventListener('wheel', e => {
+  cam.speed = Math.max(0.5, Math.min(20, cam.speed * (e.deltaY > 0 ? 0.88 : 1.14)));
+  e.preventDefault();
+}, { passive: false });
+
+// ---------- 触摸：左摇杆移动 + 划屏转视角 ----------
+const isTouch = matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 0;
+const stick = document.getElementById('stick'), knob = document.getElementById('knob');
+const joy = { x: 0, y: 0 };
+let joyId = null, lookId = null, lx = 0, ly = 0;
+const SENS_T = 0.0035;
+
+function stickMove(t) {
+  const r = stick.getBoundingClientRect(), R = r.width / 2;
+  let dx = t.clientX - (r.left + R), dy = t.clientY - (r.top + R);
+  const d = Math.hypot(dx, dy);
+  if (d > R) { dx *= R / d; dy *= R / d; }
+  knob.style.transform = `translate(${dx}px,${dy}px)`;
+  joy.x = dx / R; joy.y = -dy / R;
+}
+stick.addEventListener('touchstart', e => {
+  e.preventDefault(); e.stopPropagation();
+  if (joyId !== null) return;
+  const t = e.changedTouches[0];
+  joyId = t.identifier; stickMove(t);
+}, { passive: false });
+stick.addEventListener('touchmove', e => {
+  e.preventDefault(); e.stopPropagation();
+  for (const t of e.changedTouches) if (t.identifier === joyId) stickMove(t);
+}, { passive: false });
+function endStick(e) {
+  for (const t of e.changedTouches) {
+    if (t.identifier === joyId) {
+      joyId = null; joy.x = 0; joy.y = 0; knob.style.transform = 'translate(0,0)';
+    }
+  }
+}
+stick.addEventListener('touchend', endStick);
+stick.addEventListener('touchcancel', endStick);
+
+canvas.addEventListener('touchstart', e => {
+  const t = e.changedTouches[0];
+  if (lookId === null) { lookId = t.identifier; lx = t.clientX; ly = t.clientY; }
+  e.preventDefault();
+}, { passive: false });
+canvas.addEventListener('touchmove', e => {
+  for (const t of e.changedTouches) {
+    if (t.identifier !== lookId) continue;
+    const dx = t.clientX - lx, dy = t.clientY - ly;
+    lx = t.clientX; ly = t.clientY;
+    cam.yaw += dx * SENS_T;
+    cam.pitch -= dy * SENS_T;
+    cam.pitch = Math.max(-1.52, Math.min(1.52, cam.pitch));
+  }
+  e.preventDefault();
+}, { passive: false });
+function endLook(e) {
+  for (const t of e.changedTouches) if (t.identifier === lookId) lookId = null;
+}
+canvas.addEventListener('touchend', endLook);
+canvas.addEventListener('touchcancel', endLook);
+
+function fwdVec() {                 // 视线方向（含俯仰）
+  const cp = Math.cos(cam.pitch), sp = Math.sin(cam.pitch);
+  const cy = Math.cos(cam.yaw), sy = Math.sin(cam.yaw);
+  return [cp * sy, sp, -cp * cy];
+}
+
+// ---------- 排序 ----------
+const NB = 2048;
+const bkt = new Uint16Array(N);
+const cnts = new Uint32Array(NB + 1);
+function sortSplats(fw) {
+  let dmin = 1e30, dmax = -1e30;
+  const cx = cam.x, cy = cam.y, cz = cam.z;
+  const dep = new Float32Array(N);
+  for (let i = 0; i < N; i++) {
+    const dx = f32[i*8] - cx, dy = f32[i*8+1] - cy, dz = f32[i*8+2] - cz;
+    const d = dx * fw[0] + dy * fw[1] + dz * fw[2];
+    dep[i] = d;
+    if (d < dmin) dmin = d;
+    if (d > dmax) dmax = d;
+  }
+  const span = Math.max(1e-3, dmax - dmin);
+  cnts.fill(0);
+  for (let i = 0; i < N; i++) {
+    let b = ((dep[i] - dmin) / span * (NB - 1)) | 0;
+    b = NB - 1 - b;                      // 远 -> 近
+    bkt[i] = b; cnts[b]++;
+  }
+  let acc = 0;
+  for (let b = 0; b < NB; b++) { const c = cnts[b]; cnts[b] = acc; acc += c; }
+  for (let i = 0; i < N; i++) order[cnts[bkt[i]]++] = i;
+  gl.bindBuffer(gl.ARRAY_BUFFER, idxBuf);
+  gl.bufferSubData(gl.ARRAY_BUFFER, 0, order);
+}
+
+// ---------- 矩阵 ----------
+function perspective(fovy, aspect, near, far) {
+  const f = 1 / Math.tan(fovy / 2), nf = 1 / (near - far);
+  return new Float32Array([f/aspect,0,0,0, 0,f,0,0, 0,0,(far+near)*nf,-1, 0,0,2*far*near*nf,0]);
+}
+function lookAt(eye, ctr, up) {
+  let zx = eye[0]-ctr[0], zy = eye[1]-ctr[1], zz = eye[2]-ctr[2];
+  let l = Math.hypot(zx,zy,zz); zx/=l; zy/=l; zz/=l;
+  let xx = up[1]*zz - up[2]*zy, xy = up[2]*zx - up[0]*zz, xz = up[0]*zy - up[1]*zx;
+  l = Math.hypot(xx,xy,xz); xx/=l; xy/=l; xz/=l;
+  const yx = zy*xz - zz*xy, yy = zz*xx - zx*xz, yz = zx*xy - zy*xx;
+  return new Float32Array([
+    xx, yx, zx, 0,
+    xy, yy, zy, 0,
+    xz, yz, zz, 0,
+    -(xx*eye[0]+xy*eye[1]+xz*eye[2]), -(yx*eye[0]+yy*eye[1]+yz*eye[2]), -(zx*eye[0]+zy*eye[1]+zz*eye[2]), 1]);
+}
+
+// ---------- 主循环 ----------
+let last = performance.now(), fpsAcc = 0, fpsN = 0, fps = 0, sortT = 0;
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  fpsAcc += dt; fpsN++;
+  if (fpsAcc > 0.5) { fps = fpsN / fpsAcc; fpsAcc = 0; fpsN = 0; }
+
+  const fw = fwdVec();
+  const rg = [Math.cos(cam.yaw), 0, Math.sin(cam.yaw)];   // 视线右方（水平）
+  let m = [0,0,0];
+  if (keys.KeyW) { m[0]+=fw[0]; m[1]+=fw[1]; m[2]+=fw[2]; }
+  if (keys.KeyS) { m[0]-=fw[0]; m[1]-=fw[1]; m[2]-=fw[2]; }
+  if (keys.KeyD) { m[0]+=rg[0]; m[2]+=rg[2]; }
+  if (keys.KeyA) { m[0]-=rg[0]; m[2]-=rg[2]; }
+  if (keys.Space) m[1] += 1;
+  if (keys.ShiftLeft || keys.ShiftRight) m[1] -= 1;
+  if (joy.y) { m[0] += Math.sin(cam.yaw) * joy.y; m[2] += -Math.cos(cam.yaw) * joy.y; }
+  if (joy.x) { m[0] += rg[0] * joy.x; m[2] += rg[2] * joy.x; }
+
+  // 目标速度 -> 平滑逼近，起步/停步都有惯性（MC 飞行手感）
+  const L = Math.hypot(m[0], m[1], m[2]);
+  const spd = cam.speed * (sprinting ? 2.5 : 1);
+  const k = 1 - Math.exp(-(L > 1e-6 ? ACC : DEC) * dt);
+  if (L > 1e-6) {
+    vel[0] += (m[0] / L * spd - vel[0]) * k;
+    vel[1] += (m[1] / L * spd - vel[1]) * k;
+    vel[2] += (m[2] / L * spd - vel[2]) * k;
+  } else {
+    vel[0] -= vel[0] * k; vel[1] -= vel[1] * k; vel[2] -= vel[2] * k;
+  }
+  cam.x += vel[0] * dt; cam.y += vel[1] * dt; cam.z += vel[2] * dt;
+
+  // 疾跑时轻微拉宽 FOV，增强速度感
+  const fovT = 1.22 * (sprinting ? 1.13 : 1);
+  fovCur += (fovT - fovCur) * (1 - Math.exp(-6 * dt));
+
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+  gl.viewport(0, 0, w, h);
+  gl.clearColor(0.043, 0.051, 0.063, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+
+  const t0 = performance.now();
+  sortSplats(fw);
+  sortT = performance.now() - t0;
+
+  const view = lookAt([cam.x,cam.y,cam.z], [cam.x+fw[0],cam.y+fw[1],cam.z+fw[2]], [0,1,0]);
+  gl.useProgram(prog);
+  bindTextures();
+  gl.uniformMatrix4fv(gl.getUniformLocation(prog,'uView'), false, view);
+  gl.uniformMatrix4fv(gl.getUniformLocation(prog,'uProj'), false, perspective(fovCur, w/h, 0.05, 100));
+  gl.uniform2f(gl.getUniformLocation(prog,'uViewport'), w, h);
+
+  gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, N);
+
+  document.getElementById('stat').textContent =
+    fps.toFixed(0) + ' fps · 排序 ' + sortT.toFixed(1) + ' ms';
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

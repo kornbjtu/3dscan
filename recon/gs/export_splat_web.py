@@ -84,7 +84,7 @@ def R_from_q(q):
 
 
 # ---------- 读训练结果 ----------
-ck = torch.load(a.pt, map_location="cpu")
+ck = torch.load(a.pt, map_location="cpu", weights_only=False)
 p = ck["params"]
 S, cen = float(ck["S"]), np.asarray(ck["cen"])
 

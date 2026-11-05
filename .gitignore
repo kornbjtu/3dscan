@@ -5,41 +5,67 @@ __pycache__/
 .venv/
 venv/
 
-# ---------- 第三方工具与虚拟环境（约 13 GB，不入库） ----------
-tools/
+# ---------- 第三方工具与数据（体积大，不入库） ----------
+tools/spirula/app/
+tools/spirula/ds1/
+tools/spirula/ws_eq/
+tools/spirula/ws1/
+tools/spirula/out/
+tools/spirula/*.zip
 
 # ---------- 原始相机素材 ----------
-VID_*.insv
-LRV_*.lrv
-VID_*.mp4
 *.insv
 *.lrv
-insv_out/
+*.mp4
+LRV_*
+VID_*
 
-# ---------- 重建中间产物 ----------
-recon/**
-# 仅保留 recon 下自己写的 Python 脚本，其余（帧、特征库、点云、模型、页面）一律忽略
-!recon/**/
+# ---------- 重建输入与中间数据 ----------
+recon/eq1/
+recon/frames/
+recon/masks*/
+recon/gs/data/
+recon/**/*.ply
+recon/**/*.ckpt
+recon/**/*.bin
+recon/**/*.db
+recon/**/*.db-shm
+recon/**/*.db-wal
+recon/**/*.png
+recon/**/*.jpg
+recon/**/*.jpeg
+recon/**/*.txt
+recon/**/*.json
+
+# recon 下自己写的脚本要入库
 !recon/**/*.py
 
-# ---------- 模型 / 点云 / 缓存 ----------
+# ---------- 模型 / 点云 / 生成页面（大单文件） ----------
 *.ply
 *.splat
 *.spz
-*.db
-*.db-shm
-*.db-wal
-*.bin
-*.log
+*.ckpt
+*.pt
+*.obj
+*.dae
+*.glb
+*.gltf
+*.mtl
+splat_view*.html
+recon/**/*.html
+tools/**/*.html
 
-# ---------- 临时文件 ----------
+# ---------- 模板与生成脚本（体积小，要入库） ----------
+!scripts/**
+!scripts/*.html
+
+# ---------- 临时与系统 ----------
 .screenshots/
 .tmp/
 tmp/
 *.tmp
 *.temp
-
-# ---------- 系统与编辑器 ----------
+*.log
 .DS_Store
 Thumbs.db
 desktop.ini
