@@ -295,7 +295,8 @@ const keys = {};
 addEventListener('keydown', (e) => { keys[e.code] = true; if (e.code === 'Space') e.preventDefault(); });
 addEventListener('keyup', (e) => { keys[e.code] = false; });
 
-const SPEED = META.radius * 0.25;          // 米/秒，随场景尺度（原来 0.55 太快）
+const SPEED = META.radius * 0.10;          // 米/秒，随场景尺度（0.25 仍偏灵敏，再降到 0.10）
+const SPEED_MOBILE = 0.6;                  // 手机版摇杆/升降再降速：0.60 × SPEED
 
 function step(dt) {
   let mx = 0, my = 0, mz = 0;
@@ -314,7 +315,7 @@ function step(dt) {
   fz += r[2] * stickVec[0] + f[2] * (-stickVec[1]);
   if (fx || fy || fz) {
     const l = Math.hypot(fx, fy, fz) || 1;
-    const d = SPEED * sp * dt;
+    const d = SPEED * sp * (META.mobile ? SPEED_MOBILE : 1.0) * dt;
     camera.pos = [camera.pos[0] + fx / l * d, camera.pos[1] + fy / l * d, camera.pos[2] + fz / l * d];
     applyRot();
   }

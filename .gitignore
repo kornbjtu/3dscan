@@ -7,9 +7,8 @@ venv/
 
 # ---------- 第三方工具与数据（体积大，不入库） ----------
 tools/spirula/app/
-tools/spirula/ds1/
-tools/spirula/ws_eq/
-tools/spirula/ws1/
+tools/spirula/ds*/
+tools/spirula/ws*/
 tools/spirula/out/
 tools/spirula/*.zip
 
@@ -21,6 +20,8 @@ LRV_*
 VID_*
 
 # ---------- 重建输入与中间数据 ----------
+recon/*/ws/
+recon/*/images/
 recon/eq1/
 recon/frames/
 recon/masks*/

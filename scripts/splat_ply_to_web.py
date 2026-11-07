@@ -105,13 +105,15 @@ def _read_images_txt(path):
 
 
 def camera_anchor(imgs):
-    """官方同款默认机位：相机轨迹中心 + 平均朝向"""
+    """默认机位：第一帧的真实相机位姿（拍摄起点）。
+
+    不用轨迹中位数——多楼层场景的中位数经常落在墙体/楼板内部，开场糊成一片；
+    第一帧一定在可通行的拍摄路径上，朝向也是当时真实视线，开场最稳。
+    """
     C = np.stack([t for (_, t) in imgs])
     F = np.stack([R.T @ np.array([0.0, 0.0, 1.0]) for (R, _) in imgs])
     F /= np.linalg.norm(F, axis=1, keepdims=True) + 1e-12
-    fwd = F.mean(0)
-    fwd /= np.linalg.norm(fwd) + 1e-12
-    return np.median(C, 0), fwd
+    return C[0], F[0]
 
 
 # ---------------------------------------------------------------- 编码
