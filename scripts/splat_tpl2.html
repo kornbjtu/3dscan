@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<title>高斯泼溅漫游 · __N__ splats</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#0a0b0e;color:#dfe6ee;
+    font:13px/1.5 "Segoe UI",system-ui,sans-serif;overscroll-behavior:none}
+  canvas{display:block;width:100%;height:100%;touch-action:none}
+  #load{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;
+    justify-content:center;gap:10px;background:#0a0b0e;z-index:9;transition:opacity .4s}
+  #load.done{opacity:0;pointer-events:none}
+  #load .bar{width:220px;height:3px;background:#1c2230;border-radius:2px;overflow:hidden}
+  #load .bar i{display:block;height:100%;width:0;background:#6ea8ff;transition:width .2s}
+  #load .txt{color:#8ea6c0;font-size:12px}
+  #stick{position:fixed;left:26px;bottom:34px;width:136px;height:136px;border-radius:50%;
+    background:rgba(20,28,40,.42);border:1px solid rgba(120,170,255,.22);
+    touch-action:none;display:none;z-index:6}
+  #knob{position:absolute;left:50%;top:50%;width:58px;height:58px;margin:-29px 0 0 -29px;
+    border-radius:50%;background:rgba(140,190,255,.42);border:1px solid rgba(170,205,255,.7);
+    pointer-events:none}
+  @media (pointer:coarse){#stick{display:block}}
+  #updown{display:none;position:fixed;right:20px;bottom:calc(30px + env(safe-area-inset-bottom));
+    flex-direction:column;gap:14px;z-index:2;touch-action:none}
+  body.mobile #updown{display:flex}
+  #updown button{width:62px;height:62px;border-radius:50%;border:1px solid rgba(255,255,255,.28);
+    background:rgba(20,24,32,.5);color:#e8ecf4;font-size:22px;line-height:1;
+    -webkit-user-select:none;user-select:none;touch-action:none}
+  #updown button.on{background:rgba(90,130,190,.65);border-color:rgba(255,255,255,.6)}
+  body.mobile #stick{left:20px;bottom:calc(24px + env(safe-area-inset-bottom));width:152px;height:152px}
+  body.mobile #knob{width:66px;height:66px;margin:-33px 0 0 -33px}
+  body.mobile #load .bar{width:180px}
+</style>
+</head>
+<body>
+<canvas id="glcanvas"></canvas>
+<div id="stick"><div id="knob"></div></div>
+<div id="updown"><button id="btnUp" aria-label="上升">▲</button><button id="btnDown" aria-label="下降">▼</button></div>
+<div id="load"><div class="txt" id="lvt">正在解码高斯数据…</div><div class="bar"><i id="lvb"></i></div></div>
+
+<script id="meta" type="application/json">__META__</script>
+<script id="splat-data" type="text/plain">__DATA__</script>
+<script>
+// ---------------------------------------------------------------------------
+// 渲染器来自 Spirula Studio（GPL-3.0, github.com/harry7557558/spirula-studio）
+// ---------------------------------------------------------------------------
+__LIBS__
+
+// ---------------------------------------------------------------------------
+// 数据解码 + 交互
+// ---------------------------------------------------------------------------
+(function () {
+'use strict';
+const META = JSON.parse(document.getElementById('meta').textContent);
+if (META.mobile) { document.body.classList.add('mobile'); document.title += ' · 手机版'; }
+const N = META.count, K = META.shRest, DEG = META.shDegree, STEP = META.posStep;
+const $ = (id) => document.getElementById(id);
+const loadEl = $('load'), loadTx = $('lvt'), loadBar = $('lvb');
+
+// ---- base64 -> bytes (chunked, keeps the UI responsive while decoding) ----
+const b64 = document.getElementById('splat-data').textContent.trim();
+const PAD = b64.endsWith('==') ? 2 : (b64.endsWith('=') ? 1 : 0);
+const blen = b64.length * 3 / 4 - PAD;
+const buf = new ArrayBuffer(blen);
+const bytes = new Uint8Array(buf);
+let sent = 0;
+function decodeChunk() {
+  const CH = 1 << 20;                       // 1 MB of base64 per tick
+  const end = Math.min(sent + CH, b64.length);
+  const n = end - sent;
+  const s = b64.slice(sent, end);
+  const base = sent * 3 >> 2;
+  for (let i = 0, j = 0; i < n; i += 4, j += 3) {
+    const a = B64[s.charCodeAt(i)], b = B64[s.charCodeAt(i+1)],
+          c = B64[s.charCodeAt(i+2)], d = B64[s.charCodeAt(i+3)];
+    const o = base + j;
+    bytes[o] = (a << 2) | (b >> 4);
+    if (o + 1 < blen) bytes[o+1] = ((b & 15) << 4) | (c >> 2);
+    if (o + 2 < blen) bytes[o+2] = ((c & 3) << 6) | d;
+  }
+  sent = end;
+  const p = sent / b64.length;
+  loadBar.style.width = (p * 100).toFixed(0) + '%';
+  if (sent < b64.length) requestAnimationFrame(decodeChunk);
+  else { loadTx.textContent = '正在上传到 GPU…'; setTimeout(build, 0); }
+}
+const B64 = (() => { const t = new Int16Array(256).fill(-1);
+  const s = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  for (let i = 0; i < 64; i++) t[s.charCodeAt(i)] = i; return t; })();
+
+// ---- half-float encode (quat / color are stored as f16 for the GPU) ----
+const _f32 = new Float32Array(1), _u32 = new Uint32Array(_f32.buffer);
+function toHalf(v) {
+  _f32[0] = v; const x = _u32[0];
+  const sign = (x >>> 16) & 0x8000;
+  let e = ((x >>> 23) & 0xff) - 127 + 15;
+  let m = (x & 0x7fffff) >>> 13;
+  if (e <= 0) { if (e < -10) return sign; m = (m | 0x400) >>> (1 - e); return sign | m; }
+  if (e >= 31) return sign | 0x7c00;
+  return sign | (e << 10) | m;
+}
+const QLUT = new Uint16Array(256);
+for (let i = 0; i < 256; i++) QLUT[i] = toHalf(i / 127.5 - 1);
+
+let renderer, camera, opts, positions;
+const canvas = $('glcanvas');
+const stats = { fps: 0, sortMs: 0, sortCpu: 0, sortQueue: 0, sortBack: 0, sorts: 0 };
+
+function build() {
+  const o = META.offsets;
+  const posI  = new Int16Array(buf, o.pos, N * 3);
+  const opA   = new Uint8Array(buf, o.op, N);
+  const q8    = new Uint8Array(buf, o.quat, N * 4);
+  const scH   = new Uint16Array(buf, o.scale, N * 3);
+  const sshH  = new Uint16Array(buf, o.shscale, N);
+  const fdcH  = new Uint16Array(buf, o.fdc, N * 3);
+  const shA   = new Int8Array(buf, o.sh, N * K * 3);
+
+  const posop = new Float32Array(N * 4);
+  const quatH = new Uint16Array(N * 4);
+  const scaleH = new Uint16Array(N * 4);
+  const posf = new Float32Array(N * 3);
+  for (let i = 0; i < N; i++) {
+    const x = posI[i*3] * STEP, y = posI[i*3+1] * STEP, z = posI[i*3+2] * STEP;
+    posop[i*4] = x; posop[i*4+1] = y; posop[i*4+2] = z;
+    posop[i*4+3] = opA[i] / 255;
+    posf[i*3] = x; posf[i*3+1] = y; posf[i*3+2] = z;
+    quatH[i*4] = QLUT[q8[i*4]]; quatH[i*4+1] = QLUT[q8[i*4+1]];
+    quatH[i*4+2] = QLUT[q8[i*4+2]]; quatH[i*4+3] = QLUT[q8[i*4+3]];
+    scaleH[i*4] = scH[i*3]; scaleH[i*4+1] = scH[i*3+1];
+    scaleH[i*4+2] = scH[i*3+2]; scaleH[i*4+3] = sshH[i];
+  }
+  positions = posf;
+
+  renderer = new Renderer(canvas);
+  renderer.setSplat({
+    count: N, shDegree: DEG, shRest: K, sbLobes: 0,
+    posop, quat: quatH, scale: scaleH, fdc: fdcH, sh: shA,
+  });
+
+  opts = {
+    primitive: 0, gamut: toColMajor(GAMUTS['Rec.709']), transfer: 0, isLinear: false,
+    shDegree: DEG, exposure: 1.0, opacityScale: 1.0,
+    cameraModel: 'perspective', upAxis: 'z', showGrid: false, gridRadius: META.radius,
+    background: hexToRgb('0a0b0e'), showLobes: false,
+    pointSize: 2, frustumScale: 1, showPoints: false, showFrustums: false,
+  };
+
+  camera = new Camera();
+  camera.pos = META.start.slice();
+  camera.fov = TOUCH ? 1.74 : Math.PI / 2;
+  const f = META.fwd, l = Math.hypot(f[0], f[1], f[2]) || 1;
+  yaw = Math.atan2(f[0], f[1]);
+  pitch = Math.asin(Math.max(-1, Math.min(1, f[2] / l)));
+  applyRot();
+
+  startWorker();
+  window.__app = { renderer, camera, opts, stats, get positions() { return positions; }, get worker() { return worker; } };
+  loadEl.classList.add('done');
+  requestAnimationFrame(loop);
+}
+
+// ---- 相机姿态：yaw 绕 +Z，pitch 抬头为正 ----
+let yaw = 0, pitch = 0;
+const TOUCH = matchMedia('(pointer:coarse)').matches;
+function applyRot() {
+  const cp = Math.cos(pitch), sp = Math.sin(pitch);
+  const dx = Math.sin(yaw) * cp, dy = Math.cos(yaw) * cp, dz = sp;
+  camera.lookAt(camera.pos, [camera.pos[0] + dx, camera.pos[1] + dy, camera.pos[2] + dz], [0, 0, 1]);
+}
+
+// ---- 排序 worker：16 位计数排序（与官方同款，单趟 O(N)）----
+let worker = null, sortInFlight = false, sortedPos = null, sortedFwd = null, sortSentAt = 0;
+const WORKER_SRC = `
+let pos, N, keys, ord, hist;
+self.onmessage = (e) => {
+  const d = e.data;
+  if (d.type === 'init') {
+    pos = new Float32Array(d.pos); N = d.n;
+    keys = new Uint16Array(N); ord = new Uint32Array(N);
+    hist = new Uint32Array(65537); return;
+  }
+  const tRecv = performance.now();
+  const c = d.cam, f = d.fwd, R = d.r, S = 65535 / (2 * R);
+  const t0 = performance.now();
+  for (let i = 0, j = 0; i < N; i++, j += 3) {
+    // 远 -> 近：桶号 = 距离平面深度（截断取整，比 Math.round 快）
+    let k = ((R - ((pos[j] - c[0]) * f[0] + (pos[j+1] - c[1]) * f[1] + (pos[j+2] - c[2]) * f[2])) * S) | 0;
+    keys[i] = k < 0 ? 0 : (k > 65535 ? 65535 : k);
+  }
+  hist.fill(0);
+  for (let i = 0; i < N; i++) hist[keys[i] + 1]++;
+  for (let b = 0; b < 65536; b++) hist[b+1] += hist[b];
+  for (let i = 0; i < N; i++) ord[hist[keys[i]]++] = i;
+  const t1 = performance.now();
+  // 直接结构化克隆回传（不 transfer、不额外分配 9.6 MB，避免 GC 抖动）
+  self.postMessage({ order: ord, tRecv: tRecv, tDone: t1, tSent: d.tSent, total: t1 - t0 });
+};`;
+
+function startWorker() {
+  try {
+    const w = new Worker(URL.createObjectURL(new Blob([WORKER_SRC], { type: 'text/javascript' })));
+    w.onmessage = (e) => {
+      const d = e.data;
+      stats.sorts++;
+      stats.sortMs = performance.now() - sortSentAt;      // 主线程观测到的往返
+      stats.sortCpu = d.total;                            // worker 内实际排序耗时
+      stats.sortQueue = d.tRecv - d.tSent;                // 消息投递延迟
+      stats.sortBack = performance.now() - d.tDone;       // 回传延迟
+      renderer.updateSplatOrder(d.order);
+      sortInFlight = false;
+    };
+    w.postMessage({ type: 'init', pos: positions, n: N }, [positions.buffer]);
+    worker = w;
+    maybeSort();
+  } catch (err) {
+    console.warn('排序 worker 不可用，顺序保持初始', err);
+  }
+}
+function maybeSort() {
+  if (!worker || sortInFlight) return;
+  const f = camera.forward();
+  const moved = sortedPos
+    ? Math.hypot(camera.pos[0]-sortedPos[0], camera.pos[1]-sortedPos[1], camera.pos[2]-sortedPos[2]) : 1e9;
+  const turned = sortedFwd
+    ? Math.abs(f[0]-sortedFwd[0]) + Math.abs(f[1]-sortedFwd[1]) + Math.abs(f[2]-sortedFwd[2]) : 1e9;
+  if (moved < META.radius * 0.03 && turned < 0.02) return;
+  sortInFlight = true;
+  sortedPos = camera.pos.slice();
+  sortedFwd = f;
+  sortSentAt = performance.now();
+  worker.postMessage({ cam: camera.pos, fwd: f, r: META.radius, tSent: sortSentAt });
+}
+
+// ---- 输入：手机左摇杆 + 单指拖拽转视角；桌面 WASD + 鼠标拖拽 ----
+let stickVec = [0, 0];
+(function () {
+  const stick = $('stick'), knob = $('knob');
+  let id = null, cx = 0, cy = 0, R = 55;
+  stick.addEventListener('pointerdown', (e) => {
+    id = e.pointerId; stick.setPointerCapture(id);
+    const r = stick.getBoundingClientRect();
+    cx = r.left + r.width / 2; cy = r.top + r.height / 2; R = r.width * 0.4;
+    move(e);
+  });
+  stick.addEventListener('pointermove', (e) => { if (e.pointerId === id) move(e); });
+  const up = (e) => {
+    if (e.pointerId !== id) return;
+    id = null; stickVec = [0, 0];
+    knob.style.transform = '';
+  };
+  stick.addEventListener('pointerup', up);
+  stick.addEventListener('pointercancel', up);
+  function move(e) {
+    let dx = e.clientX - cx, dy = e.clientY - cy;
+    const d = Math.hypot(dx, dy) || 1;
+    if (d > R) { dx *= R / d; dy *= R / d; }
+    knob.style.transform = 'translate(' + dx + 'px,' + dy + 'px)';
+    stickVec = [dx / R, dy / R];
+  }
+})();
+
+let padY = 0;
+if (META.mobile) {
+  const hold = (el, v) => {
+    el.addEventListener('pointerdown', (e) => { e.preventDefault(); padY = v; el.classList.add('on'); });
+    const rel = () => { if (padY === v) padY = 0; el.classList.remove('on'); };
+    el.addEventListener('pointerup', rel);
+    el.addEventListener('pointercancel', rel);
+    el.addEventListener('pointerleave', rel);
+  };
+  hold($('btnUp'), 1);
+  hold($('btnDown'), -1);
+}
+
+let dragId = null, lastX = 0, lastY = 0;
+canvas.addEventListener('pointerdown', (e) => {
+  dragId = e.pointerId; lastX = e.clientX; lastY = e.clientY;
+  canvas.setPointerCapture(dragId);
+});
+canvas.addEventListener('pointermove', (e) => {
+  if (e.pointerId !== dragId) return;
+  const dx = e.clientX - lastX, dy = e.clientY - lastY;
+  lastX = e.clientX; lastY = e.clientY;
+  yaw -= dx * (TOUCH ? 0.005 : 0.0035);
+  pitch = Math.max(-1.5, Math.min(1.5, pitch - dy * (TOUCH ? 0.005 : 0.0035)));
+  applyRot();
+});
+const endDrag = (e) => { if (e.pointerId === dragId) dragId = null; };
+canvas.addEventListener('pointerup', endDrag);
+canvas.addEventListener('pointercancel', endDrag);
+
+const keys = {};
+addEventListener('keydown', (e) => { keys[e.code] = true; if (e.code === 'Space') e.preventDefault(); });
+addEventListener('keyup', (e) => { keys[e.code] = false; });
+
+const SPEED = META.radius * 0.25;          // 米/秒，随场景尺度（原来 0.55 太快）
+
+function step(dt) {
+  let mx = 0, my = 0, mz = 0;
+  const f = camera.forward(), r = camera.right();
+  if (keys.KeyW) mz += 1; if (keys.KeyS) mz -= 1;
+  if (keys.KeyA) mx -= 1; if (keys.KeyD) mx += 1;
+  if (keys.KeyQ) my -= 1; if (keys.KeyE) my += 1;
+  if (keys.Space) my += 1;                             // 空格上升（沿世界 +Z）
+  if (keys.KeyC) my -= 1;                              // C 下降
+  my += padY;                                          // 手机版 ▲/▼ 按钮
+  const sp = (keys.ShiftLeft || keys.ShiftRight) ? 1.8 : 1.0;
+  let fx = f[0] * mz + r[0] * mx, fy = f[1] * mz + r[1] * mx, fz = f[2] * mz + r[2] * mx;
+  fx += 0.0; fy += 0.0; fz += my;                      // Q/E 垂直升降
+  fx += r[0] * stickVec[0] + f[0] * (-stickVec[1]);
+  fy += r[1] * stickVec[0] + f[1] * (-stickVec[1]);
+  fz += r[2] * stickVec[0] + f[2] * (-stickVec[1]);
+  if (fx || fy || fz) {
+    const l = Math.hypot(fx, fy, fz) || 1;
+    const d = SPEED * sp * dt;
+    camera.pos = [camera.pos[0] + fx / l * d, camera.pos[1] + fy / l * d, camera.pos[2] + fz / l * d];
+    applyRot();
+  }
+}
+
+// ---- 渲染循环（固定分辨率；不做自动降分辨率，避免转动时糊一下再清晰）----
+let lastT = performance.now(), fpsAcc = 0, fpsN = 0;
+function resize() {
+  const w = innerWidth, h = innerHeight;
+  const dpr = Math.min(devicePixelRatio || 1, META.dprCap || 2);
+  const bw = Math.min(Math.round(w * dpr), META.resCap || 2160);
+  const bh = Math.round(bw * h / w);
+  if (canvas.width !== bw || canvas.height !== bh) { canvas.width = bw; canvas.height = bh; }
+}
+addEventListener('resize', resize);
+function loop(t) {
+  const dt = Math.min(0.1, (t - lastT) / 1000); lastT = t;
+  step(dt);
+  resize();
+  maybeSort();
+  renderer.render(camera, opts);
+  fpsAcc += dt; fpsN++;
+  if (fpsN >= 40) { stats.fps = fpsN / fpsAcc; fpsAcc = 0; fpsN = 0; }
+  requestAnimationFrame(loop);
+}
+
+requestAnimationFrame(decodeChunk);
+})();
+</script>
+</body>
+</html>

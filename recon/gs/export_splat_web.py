@@ -12,7 +12,7 @@ import os, sys, base64, argparse
 import numpy as np
 import torch
 
-TMPL = r"C:\Users\zlll-\AppData\Local\Temp\splat_tpl.html"
+TMPL = r"d:\建模\scripts\splat_tpl.html"
 C0 = 0.28209479177387814
 
 ap = argparse.ArgumentParser()
